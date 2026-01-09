@@ -1,21 +1,17 @@
 ## 搭建步骤 ##
 
-1.Forks 项目
+1.pages部署并绑定R2存储桶,变量名填`BUCKET`
 
 
-2.创建R2存储桶,设置"R2.dev子域"允许访问
+2.worker部署`r2_worker.js`并绑定R2存储桶,变量名填`BUCKET`
 
 
-3.pages链接此项目并添加以下变量
+3.pages添加变量
 
-
-`PUBURL`:`公共开发URL`
+`PUBURL`:`your.worker.dev`
 
 
 `username:userpass`:`*`
-
-
-4.绑定R2存储桶,变量名填 `BUCKET`
 
 
 5.重试部署
