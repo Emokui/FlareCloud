@@ -16,51 +16,42 @@ function normalizeKey(pathname) {
   return key;
 }
 
-function hasValidRangeFormat(header) {
-  return header && /^bytes=\d*-\d*$/.test(header);
+const DEFAULT_MAX_RANGE_BYTES = 8 * 1024 * 1024;
+
+function getMaxRangeBytes(env) {
+  const value = Number(env?.RANGE_MAX_BYTES);
+  if (Number.isFinite(value) && value > 0) return value;
+  return DEFAULT_MAX_RANGE_BYTES;
 }
 
-function parseRange(rangeHeader, size) {
+function parseRange(rangeHeader, maxBytes) {
   if (!rangeHeader) return null;
   const m = rangeHeader.match(/^bytes=(\d*)-(\d*)$/);
-  if (!m) return null;
+  if (!m) return { invalid: true };
 
   const startStr = m[1];
   const endStr = m[2];
 
-  if (startStr === "" && endStr === "") return null;
-
-  if (startStr === "") {
-    const suffix = Number(endStr);
-    if (!Number.isFinite(suffix) || suffix <= 0) return null;
-
-    const length = Math.min(suffix, size);
-    const start = Math.max(0, size - length);
-    const end = size - 1;
-
-    return { offset: start, length, start, end };
-  }
+  if (startStr === "" && endStr === "") return { invalid: true };
+  if (startStr === "") return { invalid: true };
 
   const start = Number(startStr);
-  if (!Number.isFinite(start) || start < 0) return null;
+  if (!Number.isFinite(start) || start < 0) return { invalid: true };
 
+  let end;
+  let length;
   if (endStr === "") {
-    if (start >= size) return { unsatisfiable: true };
-
-    const end = size - 1;
-    const length = size - start;
-
-    return { offset: start, length, start, end };
+    length = maxBytes;
+    end = start + length - 1;
+  } else {
+    end = Number(endStr);
+    if (!Number.isFinite(end) || end < start) return { invalid: true };
+    length = end - start + 1;
   }
 
-  const end = Number(endStr);
-  if (!Number.isFinite(end) || end < start) return null;
-  if (start >= size) return { unsatisfiable: true };
+  if (length > maxBytes) return { tooLarge: true };
 
-  const clampedEnd = Math.min(end, size - 1);
-  const length = clampedEnd - start + 1;
-
-  return { offset: start, length, start, end: clampedEnd };
+  return { offset: start, length, start, end };
 }
 
 function build304Headers(obj) {
@@ -98,44 +89,52 @@ export default {
     if (!key) return new Response("Bad Request", { status: 400 });
 
     const rangeHeader = request.headers.get("Range");
+    const rangeReq = parseRange(rangeHeader, getMaxRangeBytes(env));
 
-    if (hasValidRangeFormat(rangeHeader)) {
-      const head = await env.BUCKET.head(key);
-      if (!head) return new Response("Not Found", { status: 404 });
+    if (rangeHeader && (rangeReq?.invalid || rangeReq?.tooLarge)) {
+      return new Response("Range Not Satisfiable", { status: 416 });
+    }
 
-      const size = head.size;
-      const rangeReq = parseRange(rangeHeader, size);
+    if (rangeReq) {
+      const obj = await env.BUCKET.get(key, {
+        onlyIf: request.headers,
+        range: { offset: rangeReq.offset, length: rangeReq.length },
+      });
 
-      if (rangeReq?.unsatisfiable) {
+      if (!obj) return new Response("Not Found", { status: 404 });
+
+      if (!obj.body) {
+        return new Response(null, { status: 304, headers: build304Headers(obj) });
+      }
+
+      const headers = new Headers();
+      withCommonHeaders(obj, headers);
+
+      const totalSize = obj.size;
+      if (typeof totalSize === "number" && rangeReq.start >= totalSize) {
         return new Response("Range Not Satisfiable", {
           status: 416,
-          headers: { "Content-Range": `bytes */${size}` },
+          headers: { "Content-Range": `bytes */${totalSize}` },
         });
       }
 
-      if (rangeReq) {
-        const obj = await env.BUCKET.get(key, {
-          onlyIf: request.headers,
-          range: { offset: rangeReq.offset, length: rangeReq.length },
-        });
+      const end = typeof totalSize === "number"
+        ? Math.min(rangeReq.start + rangeReq.length - 1, totalSize - 1)
+        : rangeReq.end;
+      const length = end - rangeReq.start + 1;
 
-        if (!obj) return new Response("Not Found", { status: 404 });
+      headers.set(
+        "Content-Range",
+        typeof totalSize === "number"
+          ? `bytes ${rangeReq.start}-${end}/${totalSize}`
+          : `bytes ${rangeReq.start}-${end}/*`
+      );
+      headers.set("Content-Length", String(length));
 
-        if (!obj.body) {
-          return new Response(null, { status: 304, headers: build304Headers(obj) });
-        }
-
-        const headers = new Headers();
-        withCommonHeaders(obj, headers);
-
-        headers.set("Content-Range", `bytes ${rangeReq.start}-${rangeReq.end}/${size}`);
-        headers.set("Content-Length", String(rangeReq.length));
-
-        return new Response(request.method === "HEAD" ? null : obj.body, {
-          status: 206,
-          headers,
-        });
-      }
+      return new Response(request.method === "HEAD" ? null : obj.body, {
+        status: 206,
+        headers,
+      });
     }
 
     const obj = await env.BUCKET.get(key, { onlyIf: request.headers });
