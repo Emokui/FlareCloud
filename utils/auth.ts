@@ -1,30 +1,46 @@
-export function get_auth_status(context) {
-    var dopath = context.request.url.split("/api/write/items/")[1]
-    if(context.env["GUEST"]){
-        if(dopath.startsWith("_$flaredrive$/thumbnails/"))return true;
-        const allow_guest = context.env["GUEST"].split(",")
-        for (var aa of allow_guest){
-            if(aa == "*"){
-                return true
-            }else if(dopath.startsWith(aa)){
-                return true
-            }
-        }
+const THUMBNAIL_PREFIX = "_$flaredrive$/thumbnails/";
+
+function parseAllowList(value) {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
+function matchesAllowList(targetPath, allowList) {
+  if (allowList.includes("*")) return true;
+  return allowList.some((allow) => targetPath.startsWith(allow));
+}
+
+function getAllowListForRequest(context) {
+  const headers = new Headers(context.request.headers);
+  const authorization = headers.get("Authorization");
+  if (authorization && authorization.startsWith("Basic ")) {
+    const account = atob(authorization.split("Basic ")[1]);
+    if (account && context.env[account]) {
+      return parseAllowList(context.env[account]);
     }
-    var headers = new Headers(context.request.headers);
-    if(!headers.get('Authorization'))return false
-    const Authorization=headers.get('Authorization').split("Basic ")[1]
-    const account = atob(Authorization);
-    if(!account)return false
-    if(!context.env[account])return false
-    if(dopath.startsWith("_$flaredrive$/thumbnails/"))return true;
-    const allow = context.env[account].split(",")
-    for (var a of allow){
-        if(a == "*"){
-            return true
-        }else if(dopath.startsWith(a)){
-            return true
-        }
-    }
-    return false;
   }
+  if (context.env["GUEST"]) {
+    return parseAllowList(context.env["GUEST"]);
+  }
+  return null;
+}
+
+export function can_access_path(context, targetPath) {
+  if (targetPath.startsWith(THUMBNAIL_PREFIX)) return true;
+  const allowList = getAllowListForRequest(context);
+  if (!allowList) return false;
+  return matchesAllowList(targetPath, allowList);
+}
+
+export function get_allow_list(context) {
+  return getAllowListForRequest(context);
+}
+
+export function get_auth_status(context) {
+  const dopath = context.request.url.split("/api/write/items/")[1];
+  if (!dopath) return false;
+  return can_access_path(context, dopath);
+}
